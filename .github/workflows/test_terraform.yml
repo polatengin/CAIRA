@@ -364,8 +364,14 @@ jobs:
     needs: [check-should-run, changes, test]
     runs-on: ubuntu-24.04
     steps:
+      - name: 🚫 Not Allowed to Run
+        if: needs.check-should-run.outputs.should_run != 'true'
+        run: |
+          echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve tests with the /allow command."
+          exit 1
+
       - name: 🛑 Failure
-        if: ${{ (needs.changes.outputs.src != '[]' && needs.changes.outputs.src != '') && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+        if: ${{ needs.check-should-run.outputs.should_run == 'true' && (needs.changes.outputs.src != '[]' && needs.changes.outputs.src != '') && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
         run: exit 1
 
       - name: ✅ Success

@@ -111,3 +111,22 @@ jobs:
         run: gh pr merge --auto --squash "${PR_URL}"
         env:
           GITHUB_TOKEN: ${{ github.token }}
+
+  check_pr_status:
+    if: always()
+    name: Check PR Status
+    needs: [check-should-run, check_pr]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 🚫 Not Allowed to Run
+        if: needs.check-should-run.outputs.should_run != 'true'
+        run: |
+          echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve with the /allow command."
+          exit 1
+
+      - name: 🛑 Failure
+        if: ${{ needs.check-should-run.outputs.should_run == 'true' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+        run: exit 1
+
+      - name: ✅ Success
+        run: exit 0
