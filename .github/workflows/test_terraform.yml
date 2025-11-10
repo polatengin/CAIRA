@@ -367,7 +367,7 @@ jobs:
       - name: 🚫 Not Allowed to Run
         if: needs.check-should-run.outputs.should_run != 'true'
         run: |
-          echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve tests with the /allow command."
+          echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve with the /allow command."
           exit 1
 
       - name: 🛑 Failure
