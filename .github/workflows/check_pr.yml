@@ -9,6 +9,9 @@ on:
     types:
       - opened
       - synchronize
+  issue_comment:
+    types:
+      - created
 
 permissions:
   contents: write
@@ -17,10 +20,6 @@ permissions:
 concurrency:
   group: ${{ format('{0}-{1}-{2}-{3}-{4}', github.workflow, github.event_name, github.ref, github.base_ref || null, github.head_ref || null) }}
   cancel-in-progress: true
-
-env:
-  PR_URL: ${{ github.event.pull_request.html_url }}
-  PR_NUMBER: ${{ github.event.pull_request.number }}
 
 jobs:
   check-should-run:
@@ -35,11 +34,69 @@ jobs:
       - name: 🩺 Debug
         uses: raven-actions/debug@9dbdeb7eea607a7d73411895c65987e71d59a466 # v1.2.0
 
+      - name: 🧠 Resolve PR context
+        id: pr_context
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const defaultBranch = context.payload.repository?.default_branch || '';
+            const defaultRef = (context.ref || '').replace('refs/heads/', '') || defaultBranch;
+
+            async function loadPullRequest(number) {
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number
+              });
+              return data;
+            }
+
+            let pr = null;
+
+            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
+              pr = context.payload.pull_request;
+            } else if (context.eventName === 'issue_comment') {
+              if (!context.payload.issue?.pull_request) {
+                core.setFailed('Issue comment is not associated with a pull request.');
+                return;
+              }
+              pr = await loadPullRequest(context.payload.issue.number);
+            } else {
+              core.setFailed(`Unsupported event for this workflow: ${context.eventName}`);
+              return;
+            }
+
+            const outputs = {
+              number: pr?.number?.toString() ?? '',
+              url: pr?.html_url ?? '',
+              author_login: pr?.user?.login ?? '',
+              head_repo: pr?.head?.repo?.full_name ?? repoFullName,
+              head_ref: pr?.head?.ref ?? defaultRef,
+              head_sha: pr?.head?.sha ?? context.sha,
+              base_repo: pr?.base?.repo?.full_name ?? repoFullName,
+              base_ref: pr?.base?.ref ?? defaultBranch || defaultRef,
+              base_sha: pr?.base?.sha ?? process.env.GITHUB_BASE_REF ?? context.sha
+            };
+
+            for (const [key, value] of Object.entries(outputs)) {
+              core.setOutput(key, value || '');
+            }
+
+      - name: 🌐 Export PR metadata
+        run: |
+          {
+            echo "PR_URL=${{ steps.pr_context.outputs.url }}";
+            echo "PR_NUMBER=${{ steps.pr_context.outputs.number }}";
+          } >> "$GITHUB_ENV"
+
       - name: ⤵️ Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ steps.pr_context.outputs.head_repo }}
+          ref: ${{ steps.pr_context.outputs.head_ref }}
+          fetch-depth: 0
 
       - name: 🚧 Setup Node
         uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
@@ -68,7 +125,7 @@ jobs:
         run: task docs
 
       - name: 🤖 Bot details
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        if: steps.pr_context.outputs.author_login == 'dependabot[bot]'
         id: bot-details
         uses: raven-actions/bot-details@b2d5fd6eb98adc0cb67df864daa834849f3a8bc0 # v1.1.0
         with:
@@ -76,7 +133,7 @@ jobs:
 
       - name: 📤 Dependabot auto-commit (docs)
         uses: stefanzweifel/git-auto-commit-action@28e16e81777b558cc906c8750092100bbb34c5e3 # v7.0.0
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        if: steps.pr_context.outputs.author_login == 'dependabot[bot]'
         with:
           commit_message: "docs: automatic updates"
           commit_user_name: ${{ steps.bot-details.outputs.name }}
@@ -84,7 +141,7 @@ jobs:
           commit_options: "--no-verify --signoff"
 
       - name: 🔀 Check for differences
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: steps.pr_context.outputs.author_login != 'dependabot[bot]'
         run: |
           git diff --compact-summary --exit-code || \
             (echo; echo "🛑 Unexpected difference. Run 'task docs' command and commit."; git diff --exit-code)
@@ -93,7 +150,7 @@ jobs:
         run: task site:build -- --strict
 
       - name: 📝 Fetch Dependabot metadata
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        if: steps.pr_context.outputs.author_login == 'dependabot[bot]'
         id: dependabot-metadata
         uses: dependabot/fetch-metadata@08eff52bf64351f401fb50d4972fa95b9f2c2d1b # v2.4.0
         with:
@@ -101,13 +158,13 @@ jobs:
           compat-lookup: true
 
       - name: 🏷️ Label (security)
-        if: github.event.pull_request.user.login == 'dependabot[bot]' && (steps.dependabot-metadata.outputs.ghsa-id != '' || steps.dependabot-metadata.outputs.cvss != 0)
+        if: steps.pr_context.outputs.author_login == 'dependabot[bot]' && (steps.dependabot-metadata.outputs.ghsa-id != '' || steps.dependabot-metadata.outputs.cvss != 0)
         run: gh pr edit --add-label "area/security" "${PR_URL}"
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: 🤝 Enable auto-merge
-        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        if: steps.pr_context.outputs.author_login == 'dependabot[bot]'
         run: gh pr merge --auto --squash "${PR_URL}"
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -121,6 +178,9 @@ jobs:
       - name: 🚫 Not Allowed to Run
         if: needs.check-should-run.outputs.should_run != 'true'
         run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "Workflow triggered by issue comment without /allow approval. Skipping without failure." && exit 0
+          fi
           echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve tests with the /allow command."
           exit 1
 

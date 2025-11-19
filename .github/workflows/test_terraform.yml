@@ -77,18 +77,78 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       src: ${{ steps.dirs.outputs.changes }}
+      pr_number: ${{ steps.pr_context.outputs.number }}
+      head_repo: ${{ steps.pr_context.outputs.head_repo }}
+      head_ref: ${{ steps.pr_context.outputs.head_ref }}
+      head_sha: ${{ steps.pr_context.outputs.head_sha }}
+      base_sha: ${{ steps.pr_context.outputs.base_sha }}
     steps:
       - name: 🩺 Debug
         uses: raven-actions/debug@9dbdeb7eea607a7d73411895c65987e71d59a466 # v1.2.0
 
+      - name: 🧠 Resolve PR context
+        id: pr_context
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const repoFullName = `${context.repo.owner}/${context.repo.repo}`;
+            const defaultBranch = context.payload.repository?.default_branch || 'main';
+            const defaultRef = (context.ref || '').replace('refs/heads/', '') || defaultBranch;
+
+            async function loadPullRequest(number) {
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: number
+              });
+              return data;
+            }
+
+            let pr = null;
+
+            if (context.eventName === 'pull_request' || context.eventName === 'pull_request_target') {
+              pr = context.payload.pull_request;
+            } else if (context.eventName === 'issue_comment') {
+              if (context.payload.issue?.pull_request) {
+                pr = await loadPullRequest(context.payload.issue.number);
+              }
+            } else if (context.eventName === 'merge_group') {
+              const mgPr = context.payload.merge_group?.pull_requests?.[0]?.number;
+              if (mgPr) {
+                pr = await loadPullRequest(mgPr);
+              }
+            }
+
+            const outputs = {
+              number: pr?.number?.toString() ?? '',
+              url: pr?.html_url ?? '',
+              author_login: pr?.user?.login ?? '',
+              head_repo: pr?.head?.repo?.full_name ?? repoFullName,
+              head_ref: pr?.head?.ref ?? defaultRef,
+              head_sha: pr?.head?.sha ?? context.sha,
+              base_repo: pr?.base?.repo?.full_name ?? repoFullName,
+              base_ref: pr?.base?.ref ?? defaultBranch,
+              base_sha: pr?.base?.sha ?? process.env.GITHUB_BASE_REF ?? context.sha
+            };
+
+            for (const [key, value] of Object.entries(outputs)) {
+              core.setOutput(key, value || '');
+            }
+
       - name: ⤵️ Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: ${{ steps.pr_context.outputs.head_repo || github.repository }}
+          ref: ${{ steps.pr_context.outputs.head_ref || github.ref }}
+          fetch-depth: 0
 
       - name: 🗃️ Filter
         uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: filter
         with:
-          base: ${{ github.event_name == 'workflow_dispatch' && github.ref || '' }}
+          base: ${{ steps.pr_context.outputs.base_sha != '' && steps.pr_context.outputs.base_sha || (github.event_name == 'workflow_dispatch' && github.ref || '') }}
+          ref: ${{ steps.pr_context.outputs.head_sha != '' && steps.pr_context.outputs.head_sha || '' }}
           list-files: csv
           filters: |
             src:
@@ -151,6 +211,10 @@ jobs:
 
       - name: ⤵️ Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: ${{ needs.changes.outputs.head_repo != '' && needs.changes.outputs.head_repo || github.repository }}
+          ref: ${{ needs.changes.outputs.head_ref != '' && needs.changes.outputs.head_ref || github.ref }}
+          fetch-depth: 0
 
       - name: 🚧 Setup Task
         uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
@@ -367,6 +431,9 @@ jobs:
       - name: 🚫 Not Allowed to Run
         if: needs.check-should-run.outputs.should_run != 'true'
         run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "Workflow triggered by issue comment without /allow approval. Skipping without failure." && exit 0
+          fi
           echo "::error::Workflow was not allowed to run. For fork PRs, a maintainer must approve with the /allow command."
           exit 1
 
